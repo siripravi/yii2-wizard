@@ -1,5 +1,5 @@
 {
-    "name": "makroxyz/yii2-wizard",
+    "name": "siripravi/yii2-wizard",
     "description": "Wizard behavior for Yii Framework 2.0",
     "keywords": ["yii2", "extension", "wizard"],
     "type": "yii2-extension",
@@ -7,14 +7,14 @@
     "authors": [
         {
             "name": "Marco Curatitoli",
-            "email": "makroxyz@gmail.com"
+            "email": "provdigi@gmail.com"
         }
     ],
     "require": {
         "yiisoft/yii2": "*",
-        "yiisoft/yii2-bootstrap": "*"
+        "yiisoft/yii2-bootstrap5": "*"
     },
     "autoload": {
-        "psr-4": {"makroxyz\\wizard\\": ""}
+        "psr-4": {"siripravi\\wizard\\": ""}
     }
 }

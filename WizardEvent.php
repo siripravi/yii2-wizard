@@ -1,6 +1,6 @@
 <?php
 
-namespace makroxyz\wizard;
+namespace siripravi\wizard;
 
 use yii\base\Event;
 
