@@ -3,748 +3,612 @@
 namespace siripravi\wizard;
 
 use Yii;
-use yii\base\NotSupportedException;
-use yii\helpers\ArrayHelper;
-use yii\helpers\Html;
+use yii\base\Behavior;
+use yii\base\InvalidConfigException;
 use yii\helpers\Inflector;
-use yii\helpers\Url;
-use yii\web\Controller;
-use yii\web\Session;
 
 /**
- * Wizard Behavior class file.
- * Handles multi-step form navigation, data persistence, and plot-branching
- * navigation.
+ * WizardBehavior Class
  *
- * @author Marco Curatitoli <makroxyz@gmail.com>
- * This is Yii2 porting of original wizard-behavior code. Read below for credits.
+ * Processes steps making multple form handling simple to implement.
  *
- * Wizard Behavoir also allows steps to be expired, the saving and restoring of
- * data across sessions, and can generate a menu (defaults to yii\bootstrap\Nav) of steps.
+ * The Behavior raises a number of events to indicate progress:
+ * beforeWizard - raised before the wizard starts
+ * wizardStep - raised when a step is processed. If the event handler sets
+ * Event::handled = TRUE the behavior saves Event::data and the wizard moves on
+ * to the next step, otherwise the behavior returns Event::data - typically a
+ * rendering result.
+ * afterwizard  - raised when the wizard has ended. It is possible that the
+ * wizard has not processed all steps
  *
- * Inspired by the CakePHP Wizard component by jaredhoyt {@link http://github.com/jaredhoyt}.
- *
- * @copyright	Copyright &copy; 2011 PBM Web Development - All Rights Reserved
- * @package		RBAM
- * @since			V1.0.0
- * @version		$Revision: 6 $
- * @license		BSD License (see documentation)
+ * Two events are used to indicate error conditions:
+ * invalidStep - raised if the step being requested is invalid
+ * stepExpired - raised if a step has taken too long to process
+ * @see $timeout
  */
-/**
- * Wizard Behavior class
- */
-class WizardBehavior extends \yii\base\Behavior
+class WizardBehavior extends Behavior
 {
-    const BRANCH_SELECT = 'Select';
-    const BRANCH_SKIP = 'Skip';
-    const BRANCH_DESELECT = 'Deselect';
-    const EVENT_WIZARD_CANCELLED = 'wizardCancelled';
-    const EVENT_WIZARD_EXPIRED_STEP = 'wizardExpiredStep';
-    const EVENT_WIZARD_RESET = 'wizardReset';
-    const EVENT_WIZARD_FINISHED = 'wizardFinished';
-    const EVENT_WIZARD_PROCESS_STEP = 'wizardProcessStep';
-    const EVENT_WIZARD_START = 'wizardStart';
-    const EVENT_WIZARD_INVALID_STEP = 'wizardInvalidStep';
-    const EVENT_WIZARD_SAVE_DRAFT = 'wizardSaveDraft';
+    const BRANCH_DESELECT = 0;
+    const BRANCH_SELECT   = 1;
+    const BRANCH_SKIP     = -1;
+
+    const EVENT_AFTER_WIZARD  = 'afterWizard';
+    const EVENT_BEFORE_WIZARD = 'beforeWizard';
+    const EVENT_INVALID_STEP  = 'invalidStep';
+    const EVENT_WIZARD_STEP   = 'wizardStep';
+    const EVENT_STEP_EXPIRED  = 'stepExpired';
+
+    const DIRECTION_BACKWARD = -1;
+    const DIRECTION_REPEAT   = 0;
+    const DIRECTION_FORWARD  = 1;
+
+    const HTTP_STATUS_CODE = 302;
 
     /**
-     * @property boolean If true, the behavior will redirect to the "expected step"
-     * after a step has been successfully completed. If false, it will redirect to
-     * the next step in the steps array.
+     * @var boolean If TRUE, the behavior will redirect to the "expected step"
+     * after a step has been successfully completed. If FALSE, it will redirect
+     * to the next step in the steps array.
+     *
+     * The difference between the "expected step" and the "next step" is when the
+     * user goes to a previous step in the wizard; the expected step is the first
+     * unprocessed step, the next step is the next step. For example, if the
+     * wizard has 5 steps and the user has completed four of them and then goes
+     * back to the second step; the expected step is the fifth step, the next
+     * step is the third step.
+     *
+     * If {@link $forwardOnly === TRUE} the expected step is the next step
      */
     public $autoAdvance = true;
     /**
-     * @property array List of steps, in order, that are to be included in the wizard.
-     * basic example: array('login_info', 'profile', 'confirm')
-     *
-     * Steps can be labled: array('Username and Password'=>'login_info', 'User Profile'=>'profile', 'confirm')
-     *
-     * The steps array can also contain branch groups that are used to determine
-     * the path at runtime.
-     * plot-branched example: array('job_application', array('degree' => array('college', 'degree_type'), 'nodegree' => 'experience'), 'confirm');
-     *
-     * The 'branch names' (ie 'degree', 'nodegree') are arbitrary; they are used as
-     * selectors for the branch() method. Branches can point either to another
-     * steps array, that can also have branch groups, or a single step.
-     *
-     * The first "non-skipped" branch in a group (see branch()) is used by default
-     * if $defaultBranch==TRUE and a branch has not been specifically selected.
-     */
-    public $steps = [];
-    /**
-     * @property boolean If true, the first "non-skipped" branch in a group will be
+     * @var boolean If TRUE the first "non-skipped" branch in a group will be
      * used if a branch has not been specifically selected.
      */
     public $defaultBranch = true;
     /**
-     * @property boolean Whether the wizard should go to the next step if the
-     * current step expires. If true the wizard continues, if false the wizard is
-     * reset and the redirects to the expiredUrl.
-     */
-    public $continueOnExpired = false;
-    /**
-     * @property boolean If true, the user will not be allowed to edit previously
-     * completed steps.
+     * @var boolean If TRUE previously completed steps can not be reprocesed.
      */
     public $forwardOnly = false;
     /**
-     * @property array Owner event handlers
+     * @var array Event handlers; event names are the keys and the values are
+     * the event handler
+     * Events are:
+     * - beforeWizard - raised before the wizard runs
+     * - afterWizard  - raised after the wizard has finished
+     * - processStep  - raised when a step is being processed
+     * - stepExpired  - raised if a step timeout has expired
+     * - invalidStep  - raised if the step is an invalid step
      */
-    public $events = [
-        self::EVENT_WIZARD_FINISHED => 'wizardFinished',
-        self::EVENT_WIZARD_PROCESS_STEP => 'wizardProcessStep',
-        self::EVENT_WIZARD_START => 'wizardStart',
-        self::EVENT_WIZARD_INVALID_STEP => 'wizardInvalidStep'
-    ];
+    public $events = [];
     /**
-     * @property string Query parameter for the step. This must match the name
-     * of the parameter in the action that calls the wizard.
+     * @var string Query parameter for the step. This must match the name of the
+     * parameter in the action that calls the wizard.
      */
     public $queryParam = 'step';
     /**
-     * @property string The session key for the wizard.
+     * @var string The session key for the wizard.
      */
     public $sessionKey = 'Wizard';
     /**
-     * @property integer The timeout in seconds. Set to empty for no timeout.
-     * Each step must be completed within the timeout period or else the wizard expires.
+     * @var integer The timeout in seconds. Set to empty for no timeout.
+     * If a step is not completed within the timeout period the wizard expires.
      */
     public $timeout;
-    /**
-     * @property string The name attribute of the button used to cancel the wizard.
-     */
-    public $cancelButton = 'cancel';
-    /**
-     * @property string The name attribute of the button used to navigate to the previous step.
-     */
-    public $previousButton = 'previous';
-    /**
-     * @property string The name attribute of the button used to reset the wizard
-     * and start from the beginning.
-     */
-    public $resetButton = 'reset';
-    /**
-     * @property string The name attribute of the button used to save draft data.
-     */
-    public $saveDraftButton = 'save_draft';
-    /**
-     * @property mixed Url to be redirected to after the wizard has finished.
-     */
-    public $finishedUrl = '';
-    /**
-     * @property mixed Url to be redirected to after 'Cancel' submit button has been pressed by user.
-     */
-    public $cancelledUrl = '';
-    /**
-     * @property mixed Url to be redirected to if the timeout expires.
-     */
-    public $expiredUrl = '';
-    /**
-     * @property mixed Url to be redirected to after 'Draft' submit button has been pressed by user.
-     *
-     */
-    public $draftSavedUrl = '';
-    /**
-     * @var string navbar step class 
-     */
-    public $menuClass = 'yii\bootstrap\Nav';
-    /**
-     * @property array Menu properties. In addition to the properties of CMenu
-     * there is an additional previousItemCssClass that is applied to previous items.
-     * @see getMenu()
-     */
-    public $menuConfig = [];
-    /**
-     * @property string If not empty, this is added to the menu as the last item.
-     * Used to add the conclusion, i.e. what happens when the wizard completes -
-     * e.g. Register, to a menu.
-     */
-    public $menuLastItem;
-    /**
-     * @property array
-     */
-    public $menuItemOptions = [];
-    /**
-     * @var string buttons template
-     */
-    public $buttonsTemplate = "<div class=\"row\">\n<div class=\"col-sm-6\">{previous}</div>\n<div class=\"col-sm-6 text-right\">{next}{finish}</div>\n</div>";
-    /**
-     * @var wizard button class
-     */
-    public $buttonClass = 'yii\bootstrap\Button';
-    /**
-     * @var wizard buttons config
-     * keys are 'previous', 'next', 'finish'
-     */
-    public $buttonConfig = [];
-    /**
-     * @var string Internal step tracking.
-     */
-    private $_currentStep;
-    /**
-     * @var object The menu.
-     */
-    private $_menu;
-    /**
-     * @var array The steps to be processed.
-     */
-    private $_steps;
-    /**
-     * @var array Step Labels.
-     */
-    private $_stepLabels;
-    /**
-     * @var string The session key that holds processed step data.
-     */
-    private $_stepsKey;
+
     /**
      * @var string The session key that holds branch directives.
      */
     private $_branchKey;
     /**
+     * @var string The session key that indexes the number of step repetitions.
+     */
+    private $_indexKey;
+    /**
+     * @var array List of steps, in order, that are to be included in the wizard.
+     * basic example: ['login_info', 'profile', 'confirm']
+     *
+     * Steps can be labled: ['Username and Password' => 'login_info', 'User Profile' => 'profile', 'confirm']
+     *
+     * The steps array can also contain branch groups that are used to determine
+     * the path at runtime. A branch group is a named step where the value is a
+     * steps array which may itself contain branch groups.
+     * plot-branched example: ['job_application', ['degree' => ['college', 'degree_type'], 'nodegree' => 'experience'], 'confirm'];
+     *
+     * The branch names (i.e. 'degree', 'nodegree') are arbitrary.
+     *
+     * The first "non-skipped" branch in a group (see branch()) is used by
+     * default if $defaultBranch == true and a branch has not been specifically
+     * selected.
+     */
+    private $_stepsConfig = [];
+    /**
+     * @var string The session key that holds data for processed steps.
+     */
+    private $_stepDataKey;
+    /**
+     * @var string The session key that holds parsed steps.
+     */
+    private $_stepsKey;
+    /**
      * @var string The session key that holds the timeout value.
      */
     private $_timeoutKey;
     /**
-     * @var Session The session
+     * @var yii\web\Session The session
      */
     private $_session;
-    /**
-     * @var array default menu properties 
-     */
-    private $_defaultMenuConfig = [
-        'id' => 'wizard-nav',
-        'encodeLabels' => false,
-        'options' => ['class' => 'navbar-nav']
-    ];
-    /**
-     * @var array default buttons properties 
-     */
-    private $_defaultButtonConfig = [
-        'previous' => [
-            'tagName' => 'a',
-            'options' => ['class' => 'btn-default'],
-        ],
-        'next' => [
-            'options' => ['class' => 'btn-primary', 'type' => 'submit']
-        ],
-        'finish' => [
-            'options' => ['class' => 'btn-success', 'type' => 'submit']
-        ],
-    ];
-
-    public function init()
-    {
-        parent::init();
-        $this->menuConfig = ArrayHelper::merge($this->_defaultMenuConfig, $this->menuConfig);
-        $this->buttonConfig = ArrayHelper::merge($this->_defaultButtonConfig, $this->buttonConfig);
-        Yii::$app->i18n->translations['wizard'] = [
-            'class' => 'yii\i18n\PhpMessageSource',
-            'basePath' => '@vendor/makroxyz/yii2-wizard/messages',
-            'sourceLanguage' => 'en-US',
-        ];
-    }
 
     /**
      * Attaches this behavior to the owner.
-     * In addition to the \yii\base\Behavior default implementation, the owner's event
-     * handlers for wizard events are also attached.
-     * @param Controller $owner The controller that this behavior is to be attached to.
+     *
+     * @param yii\base\Controller $owner The controller that this behavior is to
+     * be attached to.
      */
     public function attach($owner)
     {
-        if (!($owner instanceof Controller)) {
-            throw new NotSupportedException(Yii::t('wizard', 'Owner must be an instance of \yii\web\Controller'));
+        if (!$owner instanceof \yii\base\Controller) {
+            throw new InvalidConfigException('Owner must be an instance of yii\base\Controller');
         }
 
         parent::attach($owner);
 
-        foreach ($this->events as $event => $handler) {
-            $this->owner->on($event, [$owner, $handler]);
+        // Attach WizardBehavior events to the owner
+        foreach ($this->events as $name => $handler) {
+            $owner->on($name, $handler);
         }
 
-        $this->_session = Yii::$app->session;
-        $this->_stepsKey = $this->sessionKey . '.steps';
-        $this->_branchKey = $this->sessionKey . '.branches';
-        $this->_timeoutKey = $this->sessionKey . '.timeout';
-
-        $this->parseSteps();
+        $this->_session     = Yii::$app->getSession();
+        $this->_branchKey   = $this->sessionKey.'.branches';
+        $this->_indexKey    = $this->sessionKey.'.index';
+        $this->_stepDataKey = $this->sessionKey.'.stepData';
+        $this->_stepsKey    = $this->sessionKey.'.steps';
+        $this->_timeoutKey  = $this->sessionKey.'.timeout';
     }
 
     /**
-     * Run the wizard for the given step.
-     * This method is called from the controller action using the wizard
-     * @param string Name of step to be processed.
+     * Start the wizard.
+     * Raises the `beforeWizard` event. To prevent the wizard from running the
+     * event handler may set the event's continue property to FALSE
+     *
+     * @return boolean Whether the wizard started
      */
-    public function process($step)
+    protected function start()
     {
-        if (isset($_REQUEST[$this->cancelButton])) {
-            return $this->cancelled($step); // Ends the wizard
-        } elseif (isset($_REQUEST[$this->resetButton]) && !$this->forwardOnly) {
-            $this->resetWizard($step); // Restarts the wizard
-            $step = null;
+        if ($this->beforeWizard()) {
+            $this->_session[$this->_branchKey]   = new \ArrayObject;
+            $this->_session[$this->_indexKey]    = 0;
+            $this->_session[$this->_stepDataKey] = new \ArrayObject;
+
+            $this->parseSteps();
+            return true;
         }
 
+        return false;
+    }
+
+    /**
+     * End the wizard.
+     * Raises the `afterWizard` event and by default deletes wizard data in the
+     * session. To preserve the data the event handler can set the event's
+     * continue property to FALSE
+     *
+     * @param boolean|string boolean: FALSE - the wizard did not start,
+     * TRUE - the wizrd completed; string: The last step processed
+     * @return mixed The event data
+     */
+    protected function end($step)
+    {
+        $event = new WizardEvent([
+            'sender'   => $this,
+            'step'     => $step,
+            'stepData' => (empty($step) ? null : $this->read())
+        ]);
+        $this->owner->trigger(self::EVENT_AFTER_WIZARD, $event);
+
+        if ($event->continue) {
+            $this->resetWizard();
+        }
+
+        return $event->data;
+    }
+
+    /**
+     * Process the given step.
+     * This method is called for each step from the controller action using the
+     * wizard
+     *
+     * If $step === NULL and the wizard has not started the wizard raises a
+     * `beforeWizard` event and starts the wizard; if the wizard has completed
+     * an `afterWizard` event is raised and the wizard ends.
+     *
+     * Otherwise the wizard moves to the next step and raises a `wizardStep` event.
+     * The event handler processes the step and sets StepEvent::data,
+     * StepEvent::nextStep, StepEvent::branch, StepEvent::continue, and
+     * StepEvent::handled to determine the behaviour of WizardBehavior.
+     *
+     * If StepEvent::continue === TRUE:
+     * If StepEvent::handled === TRUE the data in StepEvent::data is saved, any
+     * branches taken into account, and the wizard moves to the next step; what
+     * the next step is is determined by StepEvent::nextStep.
+     * If StepEvent::handled === FALSE the data in StepEvent::data is returned.
+     *
+     * If StepEvent::continue === FALSE:
+     * If StepEvent::handled === TRUE the data in StepEvent::data is saved and
+     * the wizard ends by raising an `afterWizard` event with WizardEvent::step
+     * set to the current step.
+     * If StepEvent::handled === FALSE the wizard ends by raising an
+     * `afterWizard` event with WizardEvent::step set to NULL.
+     *
+     * @param string $step Name of the step to be processed.
+     */
+    public function step($step = null)
+    {
         if (empty($step)) {
             if (!$this->hasStarted() && !$this->start()) {
-                return $this->finished(false);
-            }
-            if ($this->hasCompleted()) {
-                return $this->finished(true);
+                return $this->end(false);
+            } elseif ($this->hasCompleted()) {
+                return $this->end(true);
             } else {
-                return $this->nextStep();
+                $this->nextStep();
             }
-        } else {
-            if ($this->isValidStep($step)) {
-                $this->_currentStep = $step;
-                if (!$this->forwardOnly && isset($_REQUEST[$this->previousButton])) {
-                    return $this->previousStep();
-                } elseif ($this->processStep()) {
-                    if (isset($_REQUEST[$this->saveDraftButton])) {
-                        return $this->saveDraft($step); // Ends the wizard
+        } elseif ($this->isValidStep($step)) {
+            // Raise a `processStep` event
+            $event = new StepEvent([
+                'n'      => $this->_session[$this->_indexKey],
+                'sender' => $this,
+                'step'   => $step,
+                't'      => (isset($this->_session[$this->_stepDataKey][$step])
+                    ? count($this->_session[$this->_stepDataKey][$step])
+                    : 0
+                )
+            ]);
+
+            if (isset($this->_session[$this->_stepDataKey][$step][$this->_session[$this->_indexKey]])) {
+                $event->stepData = $this->_session[$this->_stepDataKey][$step][$this->_session[$this->_indexKey]];
+            }
+
+            $this->owner->trigger(self::EVENT_WIZARD_STEP, $event);
+
+            if ($event->continue) {
+                if ($event->handled) {
+                    if ($event->nextStep !== self::DIRECTION_BACKWARD) {
+                        $this->saveStep($step, $event->data);
+
+                        if (!empty($event->branches)) {
+                            $this->branch($event->branches);
+                        }
                     }
-                    return $this->nextStep();
+
+                    if (!$this->hasStepExpired() || $this->stepExpired($step)) {
+                        $this->nextStep($event);
+                    } else {
+                        return $this->end($step);
+                    }
+                } else {
+                    return $event->data;
                 }
             } else {
-                return $this->invalidStep($step);
+                if ($event->handled) {
+                    $this->saveStep($step, $event->data);
+                } else {
+                    $step = null;
+                }
+                return $this->end($step);
             }
-        }
-    }
-    
-    public function renderButtons()
-    {
-        $previousConfig = ArrayHelper::getValue($this->buttonConfig, 'previous');
-        if (!isset($previousConfig['class'])) {
-            $previousConfig['class'] = $this->buttonClass;
-        }
-        if (!isset($previousConfig['label'])) {
-            $previousConfig['label'] = Yii::t('wizard', 'Previous');
-        }
-        if ($this->previousRoute === false) {
-            Html::addCssClass($previousConfig['options'], 'disabled');
-            $previousConfig['options']['href'] = '#';
         } else {
-            $previousConfig['options']['href'] = Url::to($this->previousRoute);
-        }
-        $previous = Yii::createObject($previousConfig)->run();
-        
-        $finish = '';
-        $next = '';
-        if ($this->isLastStep) {
-            $finishConfig = ArrayHelper::getValue($this->buttonConfig, 'finish');
-            if (!isset($finishConfig['class'])) {
-                $finishConfig['class'] = $this->buttonClass;
+            $event = new WizardEvent([
+                'sender' => $this,
+                'step'   => $step
+            ]);
+            $this->owner->trigger(self::EVENT_INVALID_STEP, $event);
+
+            if ($event->continue) {
+                $this->nextStep(); // redirects
             }
-            if (!isset($finishConfig['label'])) {
-                $finishConfig['label'] = Yii::t('wizard', 'Finish');
-            }
-            $finish = Yii::createObject($finishConfig)->run();
-        } else {
-            $nextConfig = ArrayHelper::getValue($this->buttonConfig, 'next');
-            if (!isset($nextConfig['class'])) {
-                $nextConfig['class'] = $this->buttonClass;
-            }
-            if (!isset($nextConfig['label'])) {
-                $nextConfig['label'] = Yii::t('wizard', 'Next');
-            }
-            if ($this->isLastStep) {
-                Html::addCssClass($nextConfig['options'], 'disabled');
-            }
-            $next = Yii::createObject($nextConfig)->run();
-        }
-        
-        return strtr($this->buttonsTemplate, [
-            '{previous}' => $previous,
-            '{next}' => $next,
-            '{finish}' => $finish,
-        ]);
-    }
-    
-    public function renderPrevButton()
-    {
-        $previousConfig = ArrayHelper::getValue($this->buttonConfig, 'previous');
-        if (!isset($previousConfig['class'])) {
-            $previousConfig['class'] = $this->buttonClass;
-        }
-        if (!isset($previousConfig['label'])) {
-            $previousConfig['label'] = Yii::t('wizard', 'Previous');
-        }
-        if ($this->previousRoute === false) {
-            Html::addCssClass($previousConfig['options'], 'disabled');
-            $previousConfig['options']['href'] = '#';
-        } else {
-            $previousConfig['options']['href'] = Url::to($this->previousRoute);
-        }
-        return Yii::createObject($previousConfig)->run();
-    }
-    
-    public function renderNextButton()
-    {
-        if ($this->isLastStep) {
-            $finishConfig = ArrayHelper::getValue($this->buttonConfig, 'finish');
-            if (!isset($finishConfig['class'])) {
-                $finishConfig['class'] = $this->buttonClass;
-            }
-            if (!isset($finishConfig['label'])) {
-                $finishConfig['label'] = Yii::t('wizard', 'Finish');
-            }
-            return Yii::createObject($finishConfig)->run();
-        } else {
-            $nextConfig = ArrayHelper::getValue($this->buttonConfig, 'next');
-            if (!isset($nextConfig['class'])) {
-                $nextConfig['class'] = $this->buttonClass;
-            }
-            if (!isset($nextConfig['label'])) {
-                $nextConfig['label'] = Yii::t('wizard', 'Next');
-            }
-            if ($this->isLastStep) {
-                Html::addCssClass($nextConfig['options'], 'disabled');
-            }
-            return Yii::createObject($nextConfig)->run();
+
+            $this->resetWizard();
+            return $event->data;
         }
     }
 
     /**
      * Sets data into wizard session. Particularly useful if the data
-     * originated from WizardComponent::read() as this will restore a previous session.
-     * $data[0] is the step data, $data[1] the branch data, $data[2] is the timeout value.
+     * originated from WizardBehavior::read() as this will restore a previous
+     * session. $data[0] is the step data, $data[1] the branch data, $data[2]
+     * is the timeout value.
+     *
      * @param array Data to be written to the wizard session.
-     * @return boolean Whether the data was successfully restored; true if the data was successfully restored, false if not
+     * @return boolean TRUE if the data was successfully restored, FALSE if not
      */
-    public function restore($data)
+    public function restoreWizard($data)
     {
         if (sizeof($data) !== 3 || !is_array($data[0]) || !is_array($data[1]) || !(is_integer($data[2]) || is_null($data[2]))) {
             return false;
         }
-        $this->_session[$this->_stepsKey] = [$data[0]];
-        $this->_session[$this->_branchKey] = [$data[1]];
+        $this->_session[$this->_stepDataKey]   = $data[0];
+        $this->_session[$this->_branchKey]  = $data[1];
         $this->_session[$this->_timeoutKey] = $data[2];
         return true;
     }
 
     /**
      * Saves data into the Session.
-     * This is normally called automatically after the onProcessStep event,
-     * but can be called directly for advanced navigation purposes.
+     * The `processStep` event handler should call this method to save step data.
+     *
+     * @param string Name of the step to save
      * @param mixed Data to be saved
-     * @param string Step name. If empty the current step is used.
      */
-    public function save($data, $step = null)
+    protected function saveStep($step, $data)
     {
-//        $this->_session[$this->_stepsKey][(empty($step) ? $this->_currentStep : $step)] = $data;
-        $index = empty($step) ? $this->_currentStep : $step;
-        $steps = $this->_session->get($this->_stepsKey);
-        $steps[$index] = $data;
-        $this->_session->set($this->_stepsKey, $steps);
+        if (!isset($this->_session[$this->_stepDataKey][$step])) {
+            $this->_session[$this->_stepDataKey][$step] = new \ArrayObject;
+        }
+        $this->_session[$this->_stepDataKey][$step][] = $data;
     }
 
     /**
      * Reads data stored for a step.
-     * @param string The name of the step. If empty the data for all steps are returned.
-     * @return mixed Data for the specified step; array: data for all steps; null is no data exist for the specified step.
+     *
+     * @param string The name of the step. If empty the data for all steps are
+     * returned.
+     * @return mixed Data for the specified step; array: data for all steps;
+     * null is no data exist for the specified step.
      */
-    public function read($step = null)
+    public function read($step = '')
     {
-        return (empty($step) ?
-        $this->_session->get($this->_stepsKey) :
-        ArrayHelper::getValue($this->_session->get($this->_stepsKey), $step));
-    }
-
-    /**
-     * Returns the one-based index of the current step.
-     * Note that this is for the current steps; branching may vary the index of a given step
-     */
-    public function getCurrentStep()
-    {
-        return array_search($this->_currentStep, array_values($this->_steps)) + 1;
-    }
-    
-    /**
-     * Returns the one-based index of the current step.
-     * Note that this is for the current steps; branching may vary the index of a given step
-     */
-    public function getIsLastStep()
-    {
-        return (($this->stepCount-1) == array_search($this->_currentStep, array_values($this->_steps)));
-    }
-
-    /**
-     * Returns the one-based index of the current step.
-     * Note that this is for the current steps; branching may vary the index of a given step
-     */
-    public function getPreviousRoute()
-    {
-        if ($this->_currentStep == reset($this->_steps)) {
-            return false;
-        }
-        return [$this->owner->id . '/' . $this->owner->action->id] + [$this->queryParam => $this->_currentStep, $this->previousButton => ''];
+        return (empty($step)
+            ? $this->_session[$this->_stepDataKey]
+            : (isset($this->_session[$this->_stepDataKey][$step])
+                ? $this->_session[$this->_stepDataKey][$step]
+                : []
+            )
+        );
     }
 
     /**
      * Returns the number of steps.
-     * Note that this is for the current steps; branching may varythe number of steps
+     * _Note_: that this is for the current steps; branching may vary the number
+     * of steps
      */
     public function getStepCount()
     {
-        return count($this->_steps);
-    }
-
-    public function getStepLabel($step = null)
-    {
-        if (is_null($step)) {
-            $step = $this->_currentStep;
-        }
-        $label = $this->_stepLabels[$step];
-        if (!is_string($label)) {
-//            $label = ucwords(trim(strtolower(str_replace(array('-', '_', '.'), ' ', preg_replace('/(?<![A-Z])[A-Z]/', ' \0', $step)))));
-            $label = Inflector::humanize($step, true);
-        }
-        $index = array_search($step, array_values($this->_steps)) + 1;
-        return Html::tag('span', $index, ['class' => 'badge']) . " " . $label;
+        return count($this->_session[$this->_stepsKey]);
     }
 
     /**
-     * Resets the wizard by deleting the wizard session.
+     * @param array Steps configuration.
      */
-    public function reset()
+    public function setSteps($steps)
     {
-        $this->_session->remove($this->_branchKey);
-        $this->_session->remove($this->_stepsKey);
-        $this->_session->remove($this->_timeoutKey);
+        $this->_stepsConfig = $steps;
     }
 
     /**
-     * Sets the menu object or the menu object properties.
-     * If the value is an object, it must have a property named items.
-     * If the value is an array it is an array of CMenu properties that are merged with {@link $menuConfig}
-     * @param mixed object: Menu object; array: name=>value property pairs for CMenu
+     * @return array Steps being processed.
      */
-    public function setMenu($value)
+    public function getSteps()
     {
-        if (is_array($value)) {
-            $this->menuConfig = array_merge($this->menuConfig, $value);
-        } elseif (is_object($value)) {
-            $this->_menu = $value;
-        }
+        return array_keys($this->_session[$this->_stepsKey]);
     }
 
     /**
-     * @return object
+     * Returns the label for the given step
+     *
+     * @param string $step Step name.
+     * @return string Label for the given step
      */
-    public function getMenu()
+    public function stepLabel($step)
     {
-        if (null === $this->_menu) {
-            $properties = $this->menuConfig;
-            $properties['class'] = $this->menuClass;
-            $this->_menu = Yii::createObject($properties);
-        }
-        $this->_menu->items = $this->getMenuItems();
-        return $this->_menu;
+        return $this->_session[$this->_stepsKey][$step];
     }
+
     /**
-     * @return CMenu
+     * Resets the wizard by deleting the wizard session variables.
      */
-    public function renderMenu()
+    public function resetWizard()
     {
-        return $this->getMenu()->run();
-    }
-
-    public function getMenuItems()
-    {
-        $previous = true;
-        $items = [];
-        $url = [$this->owner->id . '/' . $this->owner->action->id];
-
-        // We should not have a url for later steps
-        // We should not have a url for earlier steps if forwards only
-        foreach ($this->_steps as $step) {
-            $item = [];
-            if (isset($this->menuItemOptions[$step])) {
-                $item['options'] = $this->menuItemOptions[$step];
-            }
-            $item['label'] = $this->getStepLabel($step);
-            if (($previous && !$this->forwardOnly) || ($step === $this->_currentStep)) {
-                $item['url'] = $url + [$this->queryParam => $step];
-                if ($step === $this->_currentStep) {
-                    $previous = false;
-                }
-            } else {
-                Html::addCssClass($item['options'], 'disabled');
-            }
-            $item['active'] = $step === $this->_currentStep;
-//            if ($previous && !empty($this->menuConfig['previousItemCssClass'])) {
-//                $item['options'] = ['class' => $this->menuConfig['previousItemCssClass']];
-//            }
-
-            $items[] = $item;
+        foreach (['_branchKey', '_indexKey', '_stepDataKey', '_stepsKey', '_timeoutKey'] as $_key) {
+            $this->_session->remove($this->$_key);
         }
-        if (!empty($this->menuLastItem)) {
-            $items[] = [
-                'label' => $this->menuLastItem,
-                'active' => false,
-            ];
-            if (isset($this->menuItemOptions[$step])) {
-                $item['options'] = $this->menuItemOptions[$step];
-            }
-            Html::addCssClass($item['options'], 'disabled');
-        }
-        return $items;
-//        $this->_menu->items = $items;
     }
 
     /**
      * Returns a value indicating if the step has expired
-     * @return boolean True if the step has expired, false if not
+     *
+     * @return boolean TRUE if the step has expired, FALSE if not
      */
-    protected function hasExpired()
+    protected function hasStepExpired()
     {
-        return isset($this->_session[$this->_timeoutKey]) && $this->_session[$this->_timeoutKey] < time();
+        return isset($this->_session[$this->_timeoutKey]) &&
+            $this->_session[$this->_timeoutKey] < time();
     }
 
     /**
-     * Moves the wizard to the next step
-     * If autoAdvance===true this will be the expectedStep,
-     * if autoAdvance===false this will be the next step in the steps array
+     * Moves the wizard to the next step.
+     * What the next step is is determined by StepEvent::nextStep, valid values
+     * are:
+     * - WizardBehavior::DIRECTION_FORWARD (default) - moves to the next step.
+     * If autoAdvance == TRUE this will be the expectedStep,
+     * if autoAdvance == FALSE this will be the next step in the steps array
+     * - WizardBehavior::DIRECTION_BACKWARD - moves to the previous step (which
+     * may be an earlier repeated step). If WizardBehavior::forwardOnly === TRUE
+     * this results in an invalid step
+     * - WizardBehavior::DIRECTION_REPEAT - repeats the current step to get
+     * another set of data
+     *
+     * If a string it is the name of the step to return to. This allows multiple
+     * steps to be repeated. If WizardBehavior::forwardOnly === TRUE this
+     * results in an invalid step.
+     *
+     * @param StepEvent $event The current step event. If NULL the wizard goes to
+     * the first step
      */
-    protected function nextStep()
+    protected function nextStep($event = null)
     {
-        if ($this->autoAdvance) {
-            $step = $this->getExpectedStep();
+        if ($event === null) { // first step, resumed wizard, or continuing after an invalid step
+            if (count($this->_session[$this->_stepDataKey]) && $this->autoAdvance) {
+                $nextStep = $this->expectedStep();
+                $this->_session[$this->_indexKey] = 0;
+            } else {
+                $nextStep = array_keys($this->_session[$this->_stepsKey])[0];
+                $this->_session[$this->_indexKey] = 0;
+            }
+        } elseif (is_string($event->nextStep)) {
+            if ($this->autoAdvance) {
+                throw new \yii\base\InvalidConfigException('StepEvent::nextStep cannot be a string if WizardBehavior::autoAdvance is TRUE');
+            }
+            $nextStep = $event->nextStep;
+            $this->_session[$this->_indexKey] = count(
+                $this->_session[$this->_stepDataKey][$nextStep]
+            );
+        } elseif ($event->nextStep === self::DIRECTION_REPEAT) {
+            $nextStep = $event->step;
+            $this->_session[$this->_indexKey] =
+            $this->_session[$this->_indexKey] + 1;
+        } elseif ($event->nextStep === self::DIRECTION_BACKWARD) {
+            if ($this->_session[$this->_indexKey] > 0) { // there are earlier repeated steps
+                $nextStep = $event->step;
+                $this->_session[$this->_indexKey] =
+                    $this->_session[$this->_indexKey] - 1;
+            } else { // go to the previous step
+                $steps = array_keys($this->_session[$this->_stepsKey]);
+                $index = array_search($event->step, $steps);
+
+                $nextStep = $steps[($index === 0 ? 0 : $index - 1)];
+                $this->_session[$this->_indexKey] = count(
+                    $this->_session[$this->_stepDataKey][$nextStep]
+                ) - 1;
+            }
+        } elseif ($this->autoAdvance) {
+            $nextStep = $this->expectedStep();
+            $this->_session[$this->_indexKey] = 0;
         } else {
-            $index = array_search($this->_currentStep, array_values($this->_steps)) + 1;
-            $step = ($index < count($this->_steps) ? array_values($this->_steps)[$index] : null);
+            $steps = array_keys($this->_session[$this->_stepsKey]);
+            $index = array_search($event->step, $steps) + 1;
+            $nextStep = ($index === count($this->_session[$this->_stepsKey])
+                ? null // wizard has finished
+                : $steps[$index]
+            );
+            $this->_session[$this->_indexKey] = (
+                $nextStep !== null && isset($this->_session[$this->_stepDataKey][$nextStep])
+                ? count(
+                    $this->_session[$this->_stepDataKey][$nextStep]
+                )
+                : 0
+            );
         }
+
+        $params = $this->owner->actionParams;
+
+        if (is_null($nextStep)) { // wizard has finished
+            unset($params[$this->queryParam]);
+        } else {
+            $params[$this->queryParam] = $nextStep;
+        }
+
         if ($this->timeout) {
             $this->_session[$this->_timeoutKey] = time() + $this->timeout;
         }
 
-        return $this->redirect($step);
-    }
-
-    /**
-     * Moves the wizard to the previous step
-     */
-    protected function previousStep()
-    {
-        $index = array_search($this->_currentStep, array_values($this->_steps)) - 1;
-        $this->redirect(array_values($this->_steps)[($index > 0 ? $index : 0)]);
+        $this->owner->redirect(array_merge(['/'.$this->owner->route], $params), self::HTTP_STATUS_CODE);
     }
 
     /**
      * Returns a value indicating if the wizard has started
-     * @return boolean True if the wizard has started, false if not
+     *
+     * @return boolean TRUE if the wizard has started, FALSE if not
      */
     protected function hasStarted()
     {
-        return isset($this->_session[$this->_stepsKey]);
+        return isset($this->_session[$this->_stepDataKey]);
     }
 
     /**
      * Returns a value indicating if the wizard has completed
-     * @return boolean True if the wizard has completed, false if not
+     *
+     * @return boolean TRUE if the wizard has completed, FALSE if not
      */
-    protected function hasCompleted()
-    {
-        return !(bool)$this->getExpectedStep();
+    protected function hasCompleted() {
+        return !(bool)$this->expectedStep();
     }
 
     /**
-     * Handles Wizard redirection. A null url will redirect to the "expected" step.
-     * @param string Step to redirect to.
-     * @param integer HTTP status code (eg: 404)
-     * @see Controller::redirect()
-     */
-    protected function redirect($step = null, $statusCode = 302)
-    {
-        if (!is_string($step)) {
-            $step = $this->getExpectedStep();
-        }
-        $url = [$this->owner->id . '/' . $this->owner->action->id, $this->queryParam => $step];
-        return $this->owner->redirect($url, $statusCode);
-    }
-
-    /**
-     * Selects, skips, or deselects a branch or branches.
-     * @param mixed Branch directives.
-     * string: The branch name or a list of branch names to select
+     * Selects, skips, or deselects branch(es)
+     *
+     * @param array|string Branch directives.
      * array: either an array of branch names to select or
-     * an array of "branch name"=>branchDirective pairs
-     * branchDirective = [self::BRANCH_SELECT|self::BRANCH_SKIP|self::BRANCH_DESELECT|]
+     * an array of "branch name" => branchDirective pairs
+     * branchDirective = [WizardBehavior::BRANCH_SELECT|WizardBehavior::BRANCH_SKIP|WizardBehavior::BRANCH_DESELECT|]
+     * string: The branch name or a list of branch names to select
      */
-    public function branch($branchDirectives)
+    protected function branch($directives)
     {
-        if (is_string($branchDirectives)) {
-            if (strpos($branchDirectives, ',')) {
-                $branchDirectives = explode(',', $branchDirectives);
-                foreach ($branchDirectives as &$name) {
-                    $name = trim($name);
-                }
-            } else {
-                $branchDirectives = array($branchDirectives);
+        if (is_string($directives)) {
+            $directives = explode(',', $directives);
+            foreach ($directives as &$name) {
+                $name = trim($name);
             }
         }
 
-        $branches = $this->branches();
-
-        foreach ($branchDirectives as $name => $directive) {
-            if ($directive === self::BRANCH_DESELECT) {
-                $branches->remove($name);
+        foreach ($directives as $name => $directive) {
+            if ($directive === self::BRANCH_DESELECT
+                && isset($this->_session[$this->_branchKey][$name])
+            ) {
+                unset($this->_session[$this->_branchKey][$name]);
             } else {
                 if (is_int($name)) {
                     $name = $directive;
                     $directive = self::BRANCH_SELECT;
                 }
-                $branches->add($name, $directive);
+                $this->_session[$this->_branchKey][$name] = $directive;
             }
         }
-        $this->_session[$this->_branchKey] = $branches;
+
         $this->parseSteps();
     }
 
     /**
-     * Returns a map of the current branch directives
-     * @return array A map of the current branch directives
-     */
-    private function branches()
-    {
-        return (isset($this->_session[$this->_branchKey]) ?
-        $this->_session[$this->_branchKey] : []);
-    }
-
-    /**
      * Validates the $step in two ways:
-     *   1. Validates that the step exists in $this->_steps array.
-     *   2. Validates that the step is the expected step or,
-     *      if forwardsOnly==false, before it.
+     * 1. Validates that the step exists in $this->_session[$this->_stepsKey] array.
+     * 2. Validates that the step is the expected step or,
+     *    if self::forwardsOnly === FALSE, before it.
+     *
      * @param string Step to validate.
-     * @return boolean Whether the step is valid; true if the step is valid,
-     * false if not
+     * @return boolean Whether the step is valid; TRUE if the step is valid,
+     * FALSE if not
      */
     protected function isValidStep($step)
     {
-        $index = array_search($step, array_values($this->_steps));
-        if ($index >= 0) {
-            if ($this->forwardOnly) {
-                return $index === array_search($this->getExpectedStep(), array_values($this->_steps));
-            }
-            return $index <= array_search($this->getExpectedStep(), array_values($this->_steps));
+        if (!$this->hasStarted()) {
+            return false;
+        }
+
+        $steps = array_keys($this->_session[$this->_stepsKey]);
+        $index = array_search($step, $steps);
+        $expectedStep = $this->expectedStep(); // NULL if wizard finished
+
+        if ($index == 0 || ($index >= 0 && ($this->forwardOnly
+            ? $expectedStep !== null &&
+                $index === array_search($expectedStep, $steps)
+            : $expectedStep === null ||
+                $index <= array_search($expectedStep, $steps)
+        )) || $this->hasCompleted()) {
+            return true;
         }
         return false;
     }
 
     /**
      * Returns the first unprocessed step (i.e. step data not saved in Session).
-     * @return string The first unprocessed step; null if all steps have been
-     * processed
+     *
+     * @return string|null The first unprocessed step; NULL if all steps have
+     * been processed
      */
-    protected function getExpectedStep()
+    protected function expectedStep()
     {
-        $steps = $this->_session[$this->_stepsKey];
-        if (!is_null($steps)) {
-            foreach ($this->_steps as $step) {
-                if (!isset($steps[$step])) {
-                    return $step;
-                }
+        $steps = $this->_session[$this->_stepDataKey];
+        foreach (array_keys($this->_session[$this->_stepsKey]) as $step) {
+            if (!isset($steps[$step])) {
+                return $step;
             }
         }
     }
@@ -754,14 +618,13 @@ class WizardBehavior extends \yii\base\Behavior
      */
     protected function parseSteps()
     {
-        $this->_steps = $this->_parseSteps($this->steps);
-        $this->_stepLabels = array_flip($this->_steps);
-        $this->_steps = $this->_steps;
+        $this->_session[$this->_stepsKey] = $this->_parseSteps($this->_stepsConfig);
     }
 
     /**
      * Parses the steps array into a "flat" array by resolving branches.
-     * Branches are resolved according the setting
+     * Branches are resolved according the settings
+     *
      * @param array The steps array.
      * @return array Steps to take
      */
@@ -771,143 +634,118 @@ class WizardBehavior extends \yii\base\Behavior
 
         foreach ($steps as $label => $step) {
             $branch = '';
+
             if (is_array($step)) {
                 foreach (array_keys($step) as $branchName) {
-                    $branchDirective = $this->branchDirective($branchName);
-                    if (($branchDirective && $branchDirective === self::BRANCH_SELECT) || (empty($branch) && $this->defaultBranch)) {
+                    $branchDirective = (isset($this->_session[$this->_branchKey][$branchName])
+                        ? $this->_session[$this->_branchKey][$branchName]
+                        : self::BRANCH_DESELECT
+                    );
+
+                    if ($branchDirective === self::BRANCH_SELECT || (
+                        empty($branch) &&
+                        $this->defaultBranch &&
+                        $branchDirective !== self::BRANCH_SKIP
+                    )) {
                         $branch = $branchName;
                     }
                 }
+
                 if (!empty($branch)) {
                     if (is_array($step[$branch])) {
-                        $parsed = array_merge($parsed, $this->_parseSteps($step[$branch]));
+                        $parsed = array_merge(
+                            $parsed, $this->_parseSteps($step[$branch])
+                        );
                     } else {
                         $parsed[$label] = $step[$branch];
                     }
                 }
             } else {
-                $parsed[$label] = $step;
+                $parsed[$step] = (is_string($label)
+                    ? $label
+                    : Inflector::titleize($step, true)
+                );
             }
         }
+
         return $parsed;
     }
 
     /**
-     * Returns the branch directive.
-     * @return string the branch directive or NULL if no directive for the branch
+     * This method is invoked before the wizard runs.
+     * The default implementation raises a `beforeWizard` event.
+     * You may override this method to do preliminary checks before the wizard
+     * runs. Make sure the parent implementation is invoked so that the event is
+     * raised.
+     *
+     * @return boolean Whether the wizard should run; defaults to TRUE.
+     * To prevent the wizard from running the event handler should set
+     * Event::continue = FALSE.
      */
-    private function branchDirective($branch)
+    protected function beforeWizard()
     {
-        return (isset($this->_session[$this->_branchKey]) ?
-        $this->_session[$this->_branchKey][$branch] : null
-        );
+        $event = new WizardEvent(['sender' => $this]);
+        $this->owner->trigger(self::EVENT_BEFORE_WIZARD, $event);
+        return $event->continue;
     }
 
     /**
-     * Raises the onStarted event.
-     * The event handler must set the event::handled property TRUE for the wizard
-     * to process steps.
+     * This method is invoked when a step has expired.
+     * The default implementation raises an `expired` event.
+     * If you override this method make sure the parent implementation is invoked
+     * so that the event is raised.
+     *
+     * @param string $step The step to process
+     * @return boolean Whether the wizard should continue; TRUE if the wizard
+     * should continue, FALSE if not
      */
-    protected function start()
+    protected function stepExpired($step)
     {
-        $event = new WizardEvent();
-        $this->owner->trigger(self::EVENT_WIZARD_START, $event);
-        if ($event->handled) {
-            $this->_session[$this->_stepsKey] = [];
+        $event = new WizardEvent([
+            'sender'   => $this,
+            'step'     => $step,
+            'stepData' => $this->read($step)
+        ]);
+        $this->owner->trigger(self::EVENT_STEP_EXPIRED, $event);
+        $this->_session[$this->_stepDataKey][$step] = $event->stepData;
+        return $event->continue;
+    }
+
+    /**
+     * Pauses the wizard.
+     * The wizard is reset and a serialized representation of the current state
+     * returned.
+     * _NOTE_: The application may wish to encrypt the returned value depending on
+     * the data collected by the wizard
+     *
+     * @return string serialized representation of the current stata of the wizard
+     */
+    public function pauseWizard()
+    {
+        $data = [];
+        foreach (['_branchKey', '_indexKey', '_stepDataKey', '_stepsKey', '_timeoutKey'] as $_key) {
+            $data[$this->$_key] = (isset($this->_session[$this->$_key])
+                ? $this->_session[$this->$_key]
+                : null
+            );
         }
-        return $event->handled;
+
+        $this->resetWizard();
+
+        return serialize($data);
     }
 
     /**
-     * Raises the onCancelled event.
-     * The event::data property contains data for processed steps.
+     * Resumes the wizard
+     *
+     * @param string The serialized representation of the wizard
      */
-    protected function cancelled($step)
+    public function resumeWizard($wizard)
     {
-        $event = new WizardEvent($step, $this->read());
-        $this->owner->trigger(self::EVENT_WIZARD_CANCELLED, $event);
-        $this->reset();
-        return $this->owner->redirect($this->cancelledUrl);
-    }
-
-    /**
-     * Raises the onExpired event.
-     */
-    protected function expired($step)
-    {
-        $event = new WizardEvent($step);
-        $this->owner->trigger(self::EVENT_WIZARD_EXPIRED_STEP, $event);
-        if ($this->continueOnExpired) {
-            return true;
+        foreach (unserialize($wizard) as $key => $value) {
+            if ($value !== null) {
+                $this->_session[$key] = $value;
+            }
         }
-        $this->reset();
-        return $this->owner->redirect($this->expiredUrl);
-    }
-
-    /**
-     * Raises the onFinished event.
-     * The event::data property contains data for processed steps.
-     */
-    protected function finished($step)
-    {
-        $event = new WizardEvent($step, $this->read());
-        $this->owner->trigger(self::EVENT_WIZARD_FINISHED, $event);
-        $this->reset();
-        if ($event->handled) {
-            return;
-        }
-        return $this->owner->redirect($this->finishedUrl);
-    }
-
-    /**
-     * Raises the onInvalidStep event.
-     */
-    protected function invalidStep($step)
-    {
-        $event = new WizardEvent($step);
-        $this->owner->trigger(self::EVENT_WIZARD_INVALID_STEP, $event);
-        return $this->redirect();
-    }
-
-    /**
-     * Raises the onProcessStep event.
-     * The event::data property contains the current data for the step.
-     * The event handler must set the event::handled property TRUE for the wizard
-     * to move to the next step.
-     */
-    protected function processStep()
-    {
-        $event = new WizardEvent($this->_currentStep, $this->read());
-        $this->owner->trigger(self::EVENT_WIZARD_PROCESS_STEP, $event);
-        if ($event->handled && $this->hasExpired()) {
-            $this->expired($this->_currentStep);
-        }
-        return $event->handled;
-    }
-
-    /**
-     * Resets the wizard by deleting the wizard session.
-     */
-    public function resetWizard($step)
-    {
-        $this->reset();
-        $event = new WizardEvent($step);
-        $this->owner->trigger(self::EVENT_WIZARD_RESET, $event);
-    }
-
-    /**
-     * Raises the onSaveDraft event.
-     * The event::data property contains the data to save.
-     */
-    protected function saveDraft($step)
-    {
-        $event = new WizardEvent($step, array(
-            $this->read(),
-            $this->branches(),
-            $this->_session[$this->_timeoutKey]
-        ));
-        $this->owner->trigger(self::EVENT_WIZARD_SAVE_DRAFT, $event);
-        $this->reset();
-        return $this->owner->redirect($this->draftSavedUrl);
     }
 }
