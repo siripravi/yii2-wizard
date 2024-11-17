@@ -3,7 +3,7 @@
     "description": "Wizard behavior for Yii Framework 2.0",
     "keywords": ["yii2", "extension", "wizard"],
     "type": "yii2-extension",
-    "license": "BSD 3-Clause",
+    "license": "MIT",
     "authors": [
         {
             "name": "Marco Curatitoli",
