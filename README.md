@@ -13,13 +13,13 @@ The preferred way to install this extension is through [composer](http://getcomp
 Either run
 
 ```
-php composer.phar require --prefer-dist makroxyz/yii2-wizard "*"
+php composer.phar require --prefer-dist siripravi/yii2-wizard "*"
 ```
 
 or add
 
 ```
-"makroxyz/yii2-wizard": "*"
+"siripravi/yii2-wizard": "*"
 ```
 
 to the require section of your `composer.json` file.
