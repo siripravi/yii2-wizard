@@ -1,4 +1,5 @@
 <?php
+namespace siripravi\wizard;
 /**
  * StepEvent class.
  * Represents events raised while processing wizard steps.
