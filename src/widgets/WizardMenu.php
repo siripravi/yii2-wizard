@@ -9,12 +9,13 @@ use siripravi\wizard\assets\WizardWidgetAsset;
  * WizardMenu class.
  * Creates a menu from the wizard steps.
  */
-class WizardMenu extends yii\bootstrap5\Nav
+class WizardMenu extends Menu
 {
     /**
      * @var string widget html id
      */
     public $id = 'wizard';
+    public $options = ['id' => 'progressbar'];
 
     /**
      * @var array default button configuration

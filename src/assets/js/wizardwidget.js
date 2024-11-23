@@ -1,84 +1,118 @@
-$(document).ready(function () {
-  //Initialize tooltips
-  //  $('.nav-tabs > li a[title]').tooltip();
+;(function($) {
+  "use strict";  
+  
+  //* Form js
+  function verificationForm(){
+      //jQuery time
+      var current_fs, next_fs, previous_fs; //fieldsets
+      var left, opacity, scale; //fieldset properties which we will animate
+      var animating; //flag to prevent quick multi-click glitches
 
-  const tabEl = document.querySelector('a[data-bs-toggle="tab"]');
-  tabEl.addEventListener("shown.bs.tab", (event) => {
-    // event.target // newly activated tab
-    // event.relatedTarget // previous active tab
-    alert("TAB CHANGED");
-    var $target = $(event.target);
-    // alert(e.targeṭ.id);
-    if ($target.parent().hasClass("disabled")) {
-      return false;
-    }
-  });
+      $(".next").click(function () {
+          if (animating) return false;
+          animating = true;
 
-  // Manage next step button click
-  $(document).on("click", ".next-step", function (e) {
-    var $tab_active = $(".wizard .nav-tabs li.active");
+          current_fs = $(this).parent();
+          next_fs = $(this).parent().next();
 
-    var $next_tab = $tab_active.next();
-    var $function = jQuery(this).data("function") || false;
+          //activate next step on progressbar using the index of next_fs
+          $("#progressbar li").eq($("fieldset").index(next_fs)).addClass("active");
 
-    if ($function) {
-      var callback = function () {
-        // alert("ok");
-        $next_tab.removeClass("disabled");
-        nextTab($tab_active);
+          //show the next fieldset
+          next_fs.show();
+          //hide the current fieldset with style
+          current_fs.animate({
+              opacity: 0
+          }, {
+              step: function (now, mx) {
+                  //as the opacity of current_fs reduces to 0 - stored in "now"
+                  //1. scale current_fs down to 80%
+                  scale = 1 - (1 - now) * 0.2;
+                  //2. bring next_fs from the right(50%)
+                  left = (now * 50) + "%";
+                  //3. increase opacity of next_fs to 1 as it moves in
+                  opacity = 1 - now;
+                  current_fs.css({
+                      'transform': 'scale(' + scale + ')',
+                      'position': 'absolute'
+                  });
+                  next_fs.css({
+                      'left': left,
+                      'opacity': opacity
+                  });
+              },
+              duration: 800,
+              complete: function () {
+                  current_fs.hide();
+                  animating = false;
+              },
+              //this comes from the custom easing plugin
+              easing: 'easeInOutBack'
+          });
+      });
+
+      $(".previous").click(function () {
+          if (animating) return false;
+          animating = true;
+
+          current_fs = $(this).parent();
+          previous_fs = $(this).parent().prev();
+
+          //de-activate current step on progressbar
+          $("#progressbar li").eq($("fieldset").index(current_fs)).removeClass("active");
+
+          //show the previous fieldset
+          previous_fs.show();
+          //hide the current fieldset with style
+          current_fs.animate({
+              opacity: 0
+          }, {
+              step: function (now, mx) {
+                  //as the opacity of current_fs reduces to 0 - stored in "now"
+                  //1. scale previous_fs from 80% to 100%
+                  scale = 0.8 + (1 - now) * 0.2;
+                  //2. take current_fs to the right(50%) - from 0%
+                  left = ((1 - now) * 50) + "%";
+                  //3. increase opacity of previous_fs to 1 as it moves in
+                  opacity = 1 - now;
+                  current_fs.css({
+                      'left': left
+                  });
+                  previous_fs.css({
+                      'transform': 'scale(' + scale + ')',
+                      'opacity': opacity
+                  });
+              },
+              duration: 800,
+              complete: function () {
+                  current_fs.hide();
+                  animating = false;
+              },
+              //this comes from the custom easing plugin
+              easing: 'easeInOutBack'
+          });
+      });
+
+      $(".submit").click(function () {
+          return false;
+      })
+  }; 
+  
+  //* Add Phone no select
+  function phoneNoselect(){
+      if ( $('#msform').length ){   
+          $("#phone").intlTelInput(); 
+          $("#phone").intlTelInput("setNumber", "+880"); 
       };
-
-      // Execute data item 'function' on click
-      eval($function);
-    } else {
-       alert($next_tab.data('bs-toggle'));
-      $next_tab.removeClass("disabled");
-     //nextTab($tab_active);
-    }
-  });
-
-  // Manage previous step button click
-  $(document).on("click", ".prev-step", function (e) {
-    var $tab_active = $(".wizard .nav-tabs li.active");
-    var $function = jQuery(this).data("function") || false;
-
-    if ($function) {
-      var callback = function () {
-        prevTab($tab_active);
+  }; 
+  //* Select js
+  function nice_Select(){
+      if ( $('.product_select').length ){ 
+          $('select').niceSelect();
       };
-
-      // Execute data item 'function' on click
-      eval($function);
-    } else {
-      prevTab($tab_active);
-    }
-  });
-
-  // Manage save step button click
-  $(document).on("click", ".save-step", function (e) {
-    var $function = jQuery(this).data("function") || false;
-    // Execute data item 'function' on click
-    if ($function) {
-      eval($function);
-    }
-  });
-});
-
-// 'click' on next tab
-function nextTab(elem) {
-  alert(eleṃ.id);
-  // $(elem).next().find('a[data-bs-toggle="tab"]').click();
-  const nextTabLinkEl = $(elem)
-    .next()
-    .find(".nav-tabs .active")
-    .closest("li")
-    .next("li")
-    .find("a")[0];
-  const nextTab = new bootstrap.Tab(nextTabLinkEl);
-  nextTab.show();
-}
-
-// 'click' on prev tab
-function prevTab(elem) {
-  $(elem).prev().find('a[data-bs-toggle="tab"]').click();
-}
+  }; 
+  /*Function Calls*/  
+  verificationForm ();
+  phoneNoselect ();
+  nice_Select ();
+})(jQuery);
