@@ -400,7 +400,7 @@ class WizardBehavior extends Behavior
     {
         return $this->_session[$this->_stepsKey][$step];
     }
-
+    
     /**
      * Resets the wizard by deleting the wizard session variables.
      */

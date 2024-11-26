@@ -3,13 +3,14 @@
 namespace siripravi\wizard\widgets;
 
 use yii\widgets\Menu;
+use yii\bootstrap5\Nav;
 use siripravi\wizard\assets\WizardWidgetAsset;
 
 /**
  * WizardMenu class.
  * Creates a menu from the wizard steps.
  */
-class WizardMenu extends Menu
+class WizardMenu extends Nav
 {
     /**
      * @var string widget html id
@@ -83,8 +84,10 @@ class WizardMenu extends Menu
                 $url    = null;
             }
 
+            $label = explode("+", $this->wizard->stepLabel($step))
             $this->items[] = [
-                'label'   => $this->wizard->stepLabel($step),
+                'label'   => $label[1],
+                'icon'   => $label[0],
                 'url'     => $url,
                 'active'  => $active,
                 'options' => compact('class')
