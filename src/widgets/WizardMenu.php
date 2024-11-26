@@ -87,7 +87,7 @@ class WizardMenu extends Nav
             $label = explode("+", $this->wizard->stepLabel($step))
             $this->items[] = [
                 'label'   => $label[1],
-                'icon'   => $label[0],
+                'icon'   => Icon::show($label[0]),
                 'url'     => $url,
                 'active'  => $active,
                 'options' => compact('class')
